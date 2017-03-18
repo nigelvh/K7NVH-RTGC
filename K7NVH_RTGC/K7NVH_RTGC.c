@@ -2,6 +2,9 @@
 
 #include "K7NVH_RTGC.h"
 
+PACKET packet;
+RX_STATE state;
+
 ISR(WDT_vect){
 	timer++;
 	
@@ -25,6 +28,14 @@ int main(void) {
 	PRR1 &= 0b11111110;
 	ACSR &= 0b10111111;
 	ACSR |= 0b10001000;
+	
+	// Configure default states for pins
+	PORTB &= ~(1 << ARM_CHANNELS) | ~(1 << CHANNEL1);
+	PORTD &= ~(1 << CHANNEL2) | ~(1 << BEEP);
+	
+	// Configure output pins
+	DDRB |= (1 << ARM_CHANNELS) | (1 << CHANNEL1);
+	DDRD |= (1 << CHANNEL2) | (1 << BEEP);
 
 	// Divide 16MHz crystal down to 1MHz for CPU clock.
 	clock_prescale_set(clock_div_16);
@@ -34,29 +45,95 @@ int main(void) {
 	USB_Init();
 	CDC_Device_CreateStream(&VirtualSerial_CDC_Interface, &USBSerialStream);
 
-	// Enable interrupts
+	// Enable interrupts and run the USB routines
 	GlobalInterruptEnable();
-
 	run_lufa();
 
+	// Configure the UART (UBRRH_VALUE, UBRRL_VALUE, and USE_2X are defined by <util/setbaud.h>)
+	UBRR1H = UBRRH_VALUE;
+	UBRR1L = UBRRL_VALUE;
+#if USE_2X
+	UCSR1A |= (1 << U2X1);
+#else
+	UCSR1A &= ~(1 << U2X1);
+#endif
+	UCSR1C = (1 << UCSZ11) | (1 << UCSZ10); // 8 bit data
+	UCSR1B = (1 << RXEN1) | (1 << TXEN1); // Enable RX & TX
+
 	// Wait 5 seconds so that we can open a console to catch startup messages
-	for (uint16_t i = 0; i < 500; i++) {
-		_delay_ms(10);
-	}
+	_delay_ms(5000);
 
 	// Print startup message
 	printPGMStr(PSTR(SOFTWARE_STR));
 	fprintf(&USBSerialStream, " V%s,%s", HARDWARE_VERS, SOFTWARE_VERS);
 	run_lufa();
-
-	run_lufa();
+	
+	// Play startup tone
+	PORTD |= (1 << BEEP);
+	_delay_ms(500);
+	PORTD &= ~(1 << BEEP);
+	
+	_delay_ms(500);
+	// Check CHANNEL2 continuity
+	PORTD |= (1 << BEEP);
+	_delay_ms(500);
+	PORTD &= ~(1 << BEEP);
+	if(PINB & (1 << CHANNEL1_SENSE)){
+		_delay_ms(100);
+		PORTD |= (1 << BEEP);
+		_delay_ms(100);
+		PORTD &= ~(1 << BEEP);
+	}
+	_delay_ms(500);
+	// Check CHANNEL1 continuity
+	PORTD |= (1 << BEEP);
+	_delay_ms(500);
+	PORTD &= ~(1 << BEEP);
+	if(PIND & (1 << CHANNEL2_SENSE)){
+		_delay_ms(100);
+		PORTD |= (1 << BEEP);
+		_delay_ms(100);
+		PORTD &= ~(1 << BEEP);
+	}
 
 	INPUT_Clear();
+
+	// Initialize packet structure
+	packet.state = SYNC;
+	state = COFFEE;
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ~~ Main system loop
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+	for (;;) {
+		// Read a byte from the USB serial stream
+		BYTE_IN = CDC_Device_ReceiveByte(&VirtualSerial_CDC_Interface);
+		// USB Serial stream will return <0 if no bytes are available.
+		if (BYTE_IN >= 0) {
+			// Echo the char we just received back out the serial stream so the user's 
+			// console will display it.
+			fputc(BYTE_IN, &USBSerialStream);
+			
+			// TESTING
+			UART_Send_Char(BYTE_IN);
+			
+			if (BYTE_IN == 30) {
+				// Ctrl-^ jump into the bootloader
+				TIMSK0 = 0b00000000; // Interrupt will mess with the bootloader
+				bootloader();
+			}
+		}
+		
+		run_lufa();
+		
+		if (UART_Recv_Available()){
+			fputc(UART_Recv_Char(), &USBSerialStream);
+		}
+		
+		run_lufa();
+	}
+/*
 	for (;;) {
 		// Read a byte from the USB serial stream
 		BYTE_IN = CDC_Device_ReceiveByte(&VirtualSerial_CDC_Interface);
@@ -66,6 +143,10 @@ int main(void) {
 			// Echo the char we just received back out the serial stream so the user's 
 			// console will display it.
 			fputc(BYTE_IN, &USBSerialStream);
+			
+			
+			// TESTING
+			UART_Send_Char(BYTE_IN);
 
 			// Switch on the input byte to determine what is is and what to do.
 			switch (BYTE_IN) {
@@ -115,6 +196,7 @@ int main(void) {
 		// Keep the LUFA USB stuff fed regularly.
 		run_lufa();
 	}
+*/
 }
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -172,7 +254,6 @@ static inline void printPGMStr(PGM_P s) {
 	while((c = pgm_read_byte(s++)) != 0) fputc(c, &USBSerialStream);
 }
 
-
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ~~ Debugging Functions
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -215,4 +296,22 @@ void EVENT_USB_Device_ConfigurationChanged(void) {
 // Event handler for the library USB Control Request reception event.
 void EVENT_USB_Device_ControlRequest(void) {
 	CDC_Device_ProcessControlRequest(&VirtualSerial_CDC_Interface);
+}
+
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// ~~ UART Functions
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+static inline uint8_t UART_Recv_Available(void) {
+	return (UCSR1A & (1 << RXC1));
+}
+
+static inline char UART_Recv_Char(void) {
+	while (!(UCSR1A & (1 << RXC1)));
+	return UDR1;
+}
+
+static inline void UART_Send_Char(char c) {
+	while (!(UCSR1A & (1 << UDRE1)));
+	UDR1 = c;
 }

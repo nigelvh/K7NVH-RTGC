@@ -2,6 +2,9 @@
 #ifndef _K7NVH_RTGC_H_
 #define _K7NVH_RTGC_H_
 
+// Set the UART baud rate, must be defined before the util/setbaud.h include
+#define BAUD 9600
+
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ~~ Includes
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -17,6 +20,7 @@
 #include <stdlib.h>
 #include <avr/pgmspace.h>
 #include <avr/eeprom.h>
+#include <util/setbaud.h>
 
 #include <LUFA/Drivers/USB/USB.h>
 #include <LUFA/Platform/Platform.h>
@@ -37,13 +41,12 @@
 #define DATA_BUFF_LEN    32
 
 // Output port controls
-//#define P1EN PD0
-
-
-
-// Timing
-#define VCTL_DELAY 20 // Ticks. ~5s
-#define ICTL_DELAY 1 // Ticks. ~0.25s
+#define ARM_CHANNELS PB3
+#define CHANNEL1 PB1
+#define CHANNEL2 PD4
+#define CHANNEL1_SENSE PB2
+#define CHANNEL2_SENSE PD5
+#define BEEP PD1
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ~~ Globals
@@ -79,6 +82,21 @@ const char STR_Command_DEBUG[] PROGMEM = "DEBUG";
 char * DATA_IN;
 uint8_t DATA_IN_POS = 0;
 
+// Launch RX
+#define CBUFSIZE (200)
+#define MAX_PAYLOAD (100)
+typedef enum {COFFEE, NOLINK, LINK, ARM, FIRE} RX_STATE;
+typedef enum {SYNC, CNTH, CNTL, PYLD, CHKS} PKT_STATE;
+typedef struct {
+  PKT_STATE state;
+  int length;
+  int index;
+  uint8_t checksum;
+  uint8_t payload[MAX_PAYLOAD];
+} PACKET;
+const uint8_t txmac[] = {0x00, 0x13, 0xA2, 0x00, 0x40, 0x9B, 0xD4, 0xCC};
+
+
 /** LUFA CDC Class driver interface configuration and state information.
  * This structure is passed to all CDC Class driver functions, so that
  * multiple instances of the same class within a device can be
@@ -111,7 +129,9 @@ USB_ClassInfo_CDC_Device_t VirtualSerial_CDC_Interface = {
 
 // Set up a fake function that points to a program address where the bootloader should be
 // based on the part type.
-void (*bootloader)(void) = 0x0800;
+#ifdef __AVR_ATmega32U2__
+	void (*bootloader)(void) = 0x3800;
+#endif
 
 // USB
 static inline void run_lufa(void);
@@ -126,5 +146,10 @@ static inline void PRINT_Status(void);
 // Input
 static inline void INPUT_Clear(void);
 static inline void INPUT_Parse(void);
+
+// UART
+static inline uint8_t UART_Recv_Available(void);
+static inline char UART_Recv_Char(void);
+static inline void UART_Send_Char(char c);
 
 #endif
