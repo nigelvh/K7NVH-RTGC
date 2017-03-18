@@ -53,6 +53,7 @@
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 // Timer
+volatile unsigned long counter = 0;
 volatile unsigned long timer = 0;
 
 // Standard file stream for the CDC interface when set up, so that the
@@ -94,6 +95,7 @@ typedef struct {
   uint8_t checksum;
   uint8_t payload[MAX_PAYLOAD];
 } PACKET;
+uint8_t inCbuf[CBUFSIZE], next_in, next_out, fireCode;
 const uint8_t txmac[] = {0x00, 0x13, 0xA2, 0x00, 0x40, 0x9B, 0xD4, 0xCC};
 
 
@@ -151,5 +153,9 @@ static inline void INPUT_Parse(void);
 static inline uint8_t UART_Recv_Available(void);
 static inline char UART_Recv_Char(void);
 static inline void UART_Send_Char(char c);
+
+// Utility
+uint8_t receiveMSG(void);
+int16_t getPayload(void);
 
 #endif

@@ -6,10 +6,8 @@ PACKET packet;
 RX_STATE state;
 
 ISR(WDT_vect){
-	timer++;
+	counter++;
 	
-//	if ((timer) % VCTL_DELAY == 0){ check_voltage = 1; }
-//	if ((timer) % ICTL_DELAY == 0){ check_current = 1; }
 }
 
 // Main program entry point.
@@ -97,10 +95,13 @@ int main(void) {
 	}
 
 	INPUT_Clear();
+	next_in = 0;
+	next_out = 0;
 
 	// Initialize packet structure
 	packet.state = SYNC;
 	state = COFFEE;
+	timer = counter; // Set timer to match counter before we enter the main loop, so we know what time has passed.
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ~~ Main system loop
@@ -115,23 +116,114 @@ int main(void) {
 			// console will display it.
 			fputc(BYTE_IN, &USBSerialStream);
 			
-			// TESTING
-			UART_Send_Char(BYTE_IN);
-			
 			if (BYTE_IN == 30) {
-				// Ctrl-^ jump into the bootloader
+				// Ctrl-^ jump into the DFU bootloader
 				TIMSK0 = 0b00000000; // Interrupt will mess with the bootloader
 				bootloader();
 			}
+			
+			// TODO Add parsing function to change the expected TXMAC so we can update the system without reprogramming.
+			// Store in EEPROM.
 		}
-		
 		run_lufa();
-		
+
+		// Check if there's a byte available on the UART
 		if (UART_Recv_Available()){
-			fputc(UART_Recv_Char(), &USBSerialStream);
+			inCbuf[next_in++] = UART_Recv_Char();
+			if (next_in == CBUFSIZE) next_in = 0;
 		}
 		
-		run_lufa();
+		// Main state table
+		switch (state) {
+			// COFFEE - Wait for 10s. Gives time for operator to clear area or cancel.
+			case COFFEE:
+				// Beep while we're waiting
+				if (counter % 2 == 0) { PORTD |= (1 << BEEP); } else { PORTD &= ~(1 << BEEP); }
+				if (counter > timer + (4 * 10)) {
+					timer = counter; // Reset the timer variable to the current time.
+					state = NOLINK; // Advance the state to NOLINK
+					PORTD &= ~(1 << BEEP); // Turn off the BEEP if we're in the middle of one.
+				}
+				break;
+			// NOLINK - We don't have an active connection or it timed out. Wait for packets.
+			case NOLINK:
+				if (receiveMSG() && packet.payload[12] == 'C' && packet.payload[13] == 'H' && packet.payload[14] == 'K') {
+					timer = counter; // Reset the timer variable to the current time.
+					state = LINK; // Advance the state to LINK
+				}
+				break;
+			// LINK - We've got an active connection, make sure it doesn't time out, and parse incoming packets.
+			case LINK:
+				// If it's been more than 10s since the last message, jump back to NOLINK
+				if (counter > timer + (4 * 10)) {
+					state = NOLINK;
+					break;
+				}
+				// Parse any received and *EXPECTED* messages
+				if (receiveMSG()) {
+					timer = counter; // Reset the timer variable to the current time.
+					if (packet.payload[12] == 'C' && packet.payload[13] == 'H' && packet.payload[14] == 'K') {
+						break;
+					}
+					if (packet.payload[12] == 'A' && packet.payload[13] == 'R' && packet.payload[14] == 'M') {
+						state = ARM;
+						break;
+					}
+					// If we get here, we've received a message we weren't expecting. Something else on this channel?
+					state = NOLINK;
+					break;
+				}
+				break;
+			// ARM - We've received an ARM packet. Make sure it doesn't time out, and handle a FIRE
+			case ARM:
+				// If it's been more than 10s since the last message, jump back to NOLINK
+				if (counter > timer + (4 * 10)) {
+					state = NOLINK;
+					break;
+				}
+				// Parse any received and *EXPECTED* messages
+				if (receiveMSG()) {
+					timer = counter; // Reset the timer variable to the current time.
+					if (packet.payload[12] == 'C' && packet.payload[13] == 'H' && packet.payload[14] == 'K') {
+						state = LINK;
+						break;
+					}
+					if (packet.payload[12] == 'A' && packet.payload[13] == 'R' && packet.payload[14] == 'M') {
+						break;
+					}
+					if (packet.payload[12] == 'F' && packet.payload[13] == 'I') {
+						state = FIRE;
+						fireCode = packet.payload[14] & 0x07;
+						// Here we could differentiate on the different channels. For now we're going to do simultaneous firing.
+						// Enable the ARM MosFET
+						PORTB |= (1 << ARM_CHANNELS);
+						// Enable the CHANNEL1 and CHANNEL2 MosFETs
+						PORTB |= (1 << CHANNEL1);
+						PORTD |= (1 << CHANNEL2);
+						break;
+					}
+					// If we get here, we've recieved a message we weren't expecting. Something else on this channel?
+					state = NOLINK;
+					break;
+				}
+			// FIRE - We've fired, handle disabling the channels after a delay
+			case FIRE:
+				// The firing circuit is currently enabled, wait 1s then turn it off again.
+				if (counter > timer + (4 * 1)) {
+					state = ARM;
+					// Disable the CHANNEL1 and CHANNEL2 MosFETs
+					PORTB &= ~(1 << CHANNEL1);
+					PORTD &= ~(1 << CHANNEL2);
+					// Disable the ARM MosFET
+					PORTB &= ~(1 << ARM_CHANNELS);
+				}
+				break;
+			// DEFAULT
+			default:
+				// If we get here, something is wrong. STOP!
+				while (true);
+				break;
+		}
 	}
 /*
 	for (;;) {
@@ -314,4 +406,77 @@ static inline char UART_Recv_Char(void) {
 static inline void UART_Send_Char(char c) {
 	while (!(UCSR1A & (1 << UDRE1)));
 	UDR1 = c;
+}
+
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// ~~ Utility Functions
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+uint8_t receiveMSG(void) {
+	static uint8_t i;
+	static uint8_t maccheck;
+	while (getPayload() == 0) {
+		maccheck = true;
+		if (packet.length != 15) { continue; }
+		if (packet.payload[0] != 0x90) {
+			continue;
+		}
+		i = 0;
+		while (maccheck && (i < sizeof(txmac))) {
+			if (packet.payload[i + 1] != txmac[i++]) {
+				maccheck = false;
+			}
+		}
+		if (maccheck)
+			return true;
+	}
+	return false;
+}
+
+int16_t getPayload(void) {
+	int now = next_in;
+	uint8_t dat;
+	if (next_out == now)
+		return -1;
+	while (next_out != now) {
+		dat = inCbuf[next_out];
+		next_out += 1;
+		if (next_out == CBUFSIZE)
+			next_out = 0;
+		switch (packet.state) {
+			case SYNC:
+				if (dat == 0x7E)
+					packet.state = CNTH;
+				break;
+			case CNTH:
+				packet.length = (dat << 8);
+				packet.state = CNTL;
+				break;
+			case CNTL:
+				packet.length += dat;
+				if (packet.length > MAX_PAYLOAD) {
+					packet.state = SYNC;
+				} else {
+					packet.index = 0;
+					packet.checksum = 0;
+					packet.state = PYLD;
+				}
+				break;
+			case PYLD:
+				packet.checksum += dat;
+				packet.payload[packet.index++] = dat;
+				if (packet.index == packet.length)
+					packet.state = CHKS;
+				break;
+			case CHKS:
+				packet.checksum += dat;
+				packet.state = SYNC;
+				if (packet.checksum == 0xff)
+					return 0;
+				break;
+			default:
+				break;
+		}
+	}
+	return -1;
 }
