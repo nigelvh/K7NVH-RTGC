@@ -7,7 +7,6 @@ RX_STATE state;
 
 ISR(WDT_vect){
 	counter++;
-	
 }
 
 // Main program entry point.
@@ -72,7 +71,7 @@ int main(void) {
 	PORTD &= ~(1 << BEEP);
 	
 	_delay_ms(500);
-	// Check CHANNEL2 continuity
+	// Check CHANNEL1 continuity
 	PORTD |= (1 << BEEP);
 	_delay_ms(500);
 	PORTD &= ~(1 << BEEP);
@@ -83,7 +82,7 @@ int main(void) {
 		PORTD &= ~(1 << BEEP);
 	}
 	_delay_ms(500);
-	// Check CHANNEL1 continuity
+	// Check CHANNEL2 continuity
 	PORTD |= (1 << BEEP);
 	_delay_ms(500);
 	PORTD &= ~(1 << BEEP);
@@ -93,10 +92,15 @@ int main(void) {
 		_delay_ms(100);
 		PORTD &= ~(1 << BEEP);
 	}
+	
+	_delay_ms(1000);
 
 	INPUT_Clear();
 	next_in = 0;
 	next_out = 0;
+
+	// Load the TXMAC from EEPROM
+	EEPROM_Read_TXMAC();
 
 	// Initialize packet structure
 	packet.state = SYNC;
@@ -115,130 +119,6 @@ int main(void) {
 			// Echo the char we just received back out the serial stream so the user's 
 			// console will display it.
 			fputc(BYTE_IN, &USBSerialStream);
-			
-			if (BYTE_IN == 30) {
-				// Ctrl-^ jump into the DFU bootloader
-				TIMSK0 = 0b00000000; // Interrupt will mess with the bootloader
-				bootloader();
-			}
-			
-			// TODO Add parsing function to change the expected TXMAC so we can update the system without reprogramming.
-			// Store in EEPROM.
-		}
-		run_lufa();
-
-		// Check if there's a byte available on the UART
-		if (UART_Recv_Available()){
-			inCbuf[next_in++] = UART_Recv_Char();
-			if (next_in == CBUFSIZE) next_in = 0;
-		}
-		
-		// Main state table
-		switch (state) {
-			// COFFEE - Wait for 10s. Gives time for operator to clear area or cancel.
-			case COFFEE:
-				// Beep while we're waiting
-				if (counter % 2 == 0) { PORTD |= (1 << BEEP); } else { PORTD &= ~(1 << BEEP); }
-				if (counter > timer + (4 * 10)) {
-					timer = counter; // Reset the timer variable to the current time.
-					state = NOLINK; // Advance the state to NOLINK
-					PORTD &= ~(1 << BEEP); // Turn off the BEEP if we're in the middle of one.
-				}
-				break;
-			// NOLINK - We don't have an active connection or it timed out. Wait for packets.
-			case NOLINK:
-				if (receiveMSG() && packet.payload[12] == 'C' && packet.payload[13] == 'H' && packet.payload[14] == 'K') {
-					timer = counter; // Reset the timer variable to the current time.
-					state = LINK; // Advance the state to LINK
-				}
-				break;
-			// LINK - We've got an active connection, make sure it doesn't time out, and parse incoming packets.
-			case LINK:
-				// If it's been more than 10s since the last message, jump back to NOLINK
-				if (counter > timer + (4 * 10)) {
-					state = NOLINK;
-					break;
-				}
-				// Parse any received and *EXPECTED* messages
-				if (receiveMSG()) {
-					timer = counter; // Reset the timer variable to the current time.
-					if (packet.payload[12] == 'C' && packet.payload[13] == 'H' && packet.payload[14] == 'K') {
-						break;
-					}
-					if (packet.payload[12] == 'A' && packet.payload[13] == 'R' && packet.payload[14] == 'M') {
-						state = ARM;
-						break;
-					}
-					// If we get here, we've received a message we weren't expecting. Something else on this channel?
-					state = NOLINK;
-					break;
-				}
-				break;
-			// ARM - We've received an ARM packet. Make sure it doesn't time out, and handle a FIRE
-			case ARM:
-				// If it's been more than 10s since the last message, jump back to NOLINK
-				if (counter > timer + (4 * 10)) {
-					state = NOLINK;
-					break;
-				}
-				// Parse any received and *EXPECTED* messages
-				if (receiveMSG()) {
-					timer = counter; // Reset the timer variable to the current time.
-					if (packet.payload[12] == 'C' && packet.payload[13] == 'H' && packet.payload[14] == 'K') {
-						state = LINK;
-						break;
-					}
-					if (packet.payload[12] == 'A' && packet.payload[13] == 'R' && packet.payload[14] == 'M') {
-						break;
-					}
-					if (packet.payload[12] == 'F' && packet.payload[13] == 'I') {
-						state = FIRE;
-						fireCode = packet.payload[14] & 0x07;
-						// Here we could differentiate on the different channels. For now we're going to do simultaneous firing.
-						// Enable the ARM MosFET
-						PORTB |= (1 << ARM_CHANNELS);
-						// Enable the CHANNEL1 and CHANNEL2 MosFETs
-						PORTB |= (1 << CHANNEL1);
-						PORTD |= (1 << CHANNEL2);
-						break;
-					}
-					// If we get here, we've recieved a message we weren't expecting. Something else on this channel?
-					state = NOLINK;
-					break;
-				}
-			// FIRE - We've fired, handle disabling the channels after a delay
-			case FIRE:
-				// The firing circuit is currently enabled, wait 1s then turn it off again.
-				if (counter > timer + (4 * 1)) {
-					state = ARM;
-					// Disable the CHANNEL1 and CHANNEL2 MosFETs
-					PORTB &= ~(1 << CHANNEL1);
-					PORTD &= ~(1 << CHANNEL2);
-					// Disable the ARM MosFET
-					PORTB &= ~(1 << ARM_CHANNELS);
-				}
-				break;
-			// DEFAULT
-			default:
-				// If we get here, something is wrong. STOP!
-				while (true);
-				break;
-		}
-	}
-/*
-	for (;;) {
-		// Read a byte from the USB serial stream
-		BYTE_IN = CDC_Device_ReceiveByte(&VirtualSerial_CDC_Interface);
-
-		// USB Serial stream will return <0 if no bytes are available.
-		if (BYTE_IN >= 0) {
-			// Echo the char we just received back out the serial stream so the user's 
-			// console will display it.
-			fputc(BYTE_IN, &USBSerialStream);
-			
-			
-			// TESTING
-			UART_Send_Char(BYTE_IN);
 
 			// Switch on the input byte to determine what is is and what to do.
 			switch (BYTE_IN) {
@@ -263,7 +143,7 @@ int main(void) {
 					// Ctrl-c bail out on partial command
 					INPUT_Clear();
 					break;
-					
+
 				case 30:
 					// Ctrl-^ jump into the bootloader
 					TIMSK0 = 0b00000000; // Interrupt will mess with the bootloader
@@ -284,11 +164,143 @@ int main(void) {
 					break;
 			}
 		}
-		
-		// Keep the LUFA USB stuff fed regularly.
 		run_lufa();
+
+		// Check if there's a byte available on the UART
+		if (UART_Recv_Available()){
+			inCbuf[next_in++] = UART_Recv_Char();
+			if (next_in == CBUFSIZE) next_in = 0;
+		}
+		
+		// Main state table
+		switch (state) {
+			// COFFEE - Wait for 10s. Gives time for operator to clear area or cancel.
+			case COFFEE:
+				// Beep while we're waiting
+				if (counter % 2 == 0) { PORTD |= (1 << BEEP); } else { PORTD &= ~(1 << BEEP); }
+				if (counter > timer + (4 * 10)) {
+					timer = counter; // Reset the timer variable to the current time.
+					state = NOLINK; // Advance the state to NOLINK
+					PORTD &= ~(1 << BEEP); // Turn off the BEEP if we're in the middle of one.
+#ifdef DEBUG_STATE
+					printPGMStr(PSTR("COFFEE -> NOLINK\r\n"));
+#endif
+				}
+				break;
+			// NOLINK - We don't have an active connection or it timed out. Wait for packets.
+			case NOLINK:
+				if (receiveMSG() && packet.payload[12] == 'C' && packet.payload[13] == 'H' && packet.payload[14] == 'K') {
+					timer = counter; // Reset the timer variable to the current time.
+					state = LINK; // Advance the state to LINK
+#ifdef DEBUG_STATE
+					printPGMStr(PSTR("NOLINK - CHK -> LINK\r\n"));
+#endif
+				}
+				break;
+			// LINK - We've got an active connection, make sure it doesn't time out, and parse incoming packets.
+			case LINK:
+				// If it's been more than 11s since the last message, jump back to NOLINK
+				if (counter > timer + (4 * 11)) {
+					state = NOLINK;
+#ifdef DEBUG_STATE
+					printPGMStr(PSTR("LINK -> NOLINK\r\n"));
+#endif
+					break;
+				}
+				// Parse any received and *EXPECTED* messages
+				if (receiveMSG()) {
+					timer = counter; // Reset the timer variable to the current time.
+					if (packet.payload[12] == 'C' && packet.payload[13] == 'H' && packet.payload[14] == 'K') {
+#ifdef DEBUG_STATE
+						printPGMStr(PSTR("LINK - CHK\r\n"));
+#endif
+						break;
+					}
+					if (packet.payload[12] == 'A' && packet.payload[13] == 'R' && packet.payload[14] == 'M') {
+						state = ARM;
+#ifdef DEBUG_STATE
+						printPGMStr(PSTR("LINK - ARM -> ARM\r\n"));
+#endif
+						break;
+					}
+					// If we get here, we've received a message we weren't expecting. Something else on this channel?
+					state = NOLINK;
+#ifdef DEBUG_STATE
+					printPGMStr(PSTR("LINK - ERR -> NOLINK\r\n"));
+#endif
+					break;
+				}
+				break;
+			// ARM - We've received an ARM packet. Make sure it doesn't time out, and handle a FIRE
+			case ARM:
+				// If it's been more than 11s since the last message, jump back to NOLINK
+				if (counter > timer + (4 * 11)) {
+					state = NOLINK;
+#ifdef DEBUG_STATE
+					printPGMStr(PSTR("ARM -> NOLINK\r\n"));
+#endif
+					break;
+				}
+				// Parse any received and *EXPECTED* messages
+				if (receiveMSG()) {
+					timer = counter; // Reset the timer variable to the current time.
+					if (packet.payload[12] == 'C' && packet.payload[13] == 'H' && packet.payload[14] == 'K') {
+						state = LINK;
+#ifdef DEBUG_STATE
+						printPGMStr(PSTR("ARM - CHK -> LINK\r\n"));
+#endif
+						break;
+					}
+					if (packet.payload[12] == 'A' && packet.payload[13] == 'R' && packet.payload[14] == 'M') {
+#ifdef DEBUG_STATE
+						printPGMStr(PSTR("ARM - ARM\r\n"));
+#endif
+						break;
+					}
+					if (packet.payload[12] == 'F' && packet.payload[13] == 'I') {
+						state = FIRE;
+#ifdef DEBUG_STATE
+						printPGMStr(PSTR("ARM - FI0 -> FIRE\r\n"));
+#endif
+						fireCode = packet.payload[14] & 0x07;
+						// Here we could differentiate on the different channels. For now we're going to do simultaneous firing.
+						// Enable the ARM MosFET
+						PORTB |= (1 << ARM_CHANNELS);
+						// Enable the CHANNEL1 and CHANNEL2 MosFETs
+						PORTB |= (1 << CHANNEL1);
+						PORTD |= (1 << CHANNEL2);
+						break;
+					}
+					// If we get here, we've recieved a message we weren't expecting. Something else on this channel?
+					state = NOLINK;
+#ifdef DEBUG_STATE
+					printPGMStr(PSTR("ARM - ERR -> NOLINK\r\n"));
+#endif
+					break;
+				}
+				break;
+			// FIRE - We've fired, handle disabling the channels after a delay
+			case FIRE:
+				// The firing circuit is currently enabled, wait 1s then turn it off again.
+				if (counter > timer + (4 * 1)) {
+					state = ARM;
+#ifdef DEBUG_STATE
+					printPGMStr(PSTR("FIRE -> ARM\r\n"));
+#endif
+					// Disable the CHANNEL1 and CHANNEL2 MosFETs
+					PORTB &= ~(1 << CHANNEL1);
+					PORTD &= ~(1 << CHANNEL2);
+					// Disable the ARM MosFET
+					PORTB &= ~(1 << ARM_CHANNELS);
+				}
+				break;
+			// DEFAULT
+			default:
+				// If we get here, something is wrong. STOP!
+				while (true);
+				break;
+		}
 	}
-*/
 }
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -309,14 +321,33 @@ static inline void INPUT_Clear(void) {
 
 // We've gotten a new command, parse out what they want.
 static inline void INPUT_Parse(void) {
-	// STATUS - Print a port status summary for all ports
-	if (strncasecmp_P(DATA_IN, STR_Command_STATUS, 6) == 0) {
-		PRINT_Status();
+	// TXMAC - Print the current configured TXMAC
+	if (strncasecmp_P(DATA_IN, STR_Command_TXMAC, 5) == 0) {
+		PRINT_TXMAC();
 		return;
 	}
 	// DEBUG - Print a report of debugging information, including EEPROM variables
-	if (strncasecmp_P(DATA_IN, STR_Command_DEBUG, 10) == 0) {
+	if (strncasecmp_P(DATA_IN, STR_Command_DEBUG, 5) == 0) {
 		DEBUG_Dump();
+		return;
+	}
+	// SETMAC - Set the expected TXMAC
+	if (strncasecmp_P(DATA_IN, STR_Command_SETMAC, 6) == 0) {
+		DATA_IN += 6;
+		uint8_t temp;
+		
+		// Read the space separated HEX data
+		for (uint8_t i = 0; i < 8; i++) {
+			temp = (unsigned int)strtol(DATA_IN, &DATA_IN, 16);
+			txmac[i] = temp;
+		}
+		
+		// Save the new TXMAC to EEPROM
+		EEPROM_Write_TXMAC();
+		
+		// Print the new TXMAC
+		PRINT_TXMAC();
+		
 		return;
 	}
 	
@@ -329,15 +360,12 @@ static inline void INPUT_Parse(void) {
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 // Print a summary of all ports status'
-static inline void PRINT_Status(void) {
-	// Voltage
-	//main_voltage = ADC_Read_Main_Voltage();
-	//printPGMStr(PSTR("\r\n"));
-	//fprintf(&USBSerialStream, "%.2fV", main_voltage);
-	//alt_voltage = ADC_Read_Alt_Voltage();
-	//printPGMStr(PSTR("\r\n"));
-	//fprintf(&USBSerialStream, "%.2fV", alt_voltage);
-
+static inline void PRINT_TXMAC(void) {
+	printPGMStr(PSTR("\r\nTXMAC:"));
+	for (uint8_t i = 0; i < 8; i++) {
+		fprintf(&USBSerialStream, " %x", txmac[i]);
+	}
+	printPGMStr(PSTR("\r\n"));
 }
 
 // Print a PGM stored string
@@ -355,6 +383,15 @@ static inline void DEBUG_Dump(void) {
 	// Print hardware and software versions
 	fprintf(&USBSerialStream, "\r\nV%s,%s", HARDWARE_VERS, SOFTWARE_VERS);
 
+	// Print EEPROM TXMAC
+	printPGMStr(PSTR("\r\nEEPROM TXMAC:"));
+	for (uint8_t i = 0; i < 8; i++) {
+		fprintf(&USBSerialStream, " %x", eeprom_read_byte((uint8_t*)(EEPROM_OFFSET_TXMAC + i)));
+	}
+	
+	// Print Continuity
+	printPGMStr(PSTR("\r\nContinuity: "));
+	fprintf(&USBSerialStream, "%i %i", ((PINB & (1 << CHANNEL1_SENSE)) >> 2), ((PIND & (1 << CHANNEL2_SENSE)) >> 5));
 }
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -406,6 +443,25 @@ static inline char UART_Recv_Char(void) {
 static inline void UART_Send_Char(char c) {
 	while (!(UCSR1A & (1 << UDRE1)));
 	UDR1 = c;
+}
+
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+// ~~ UART Functions
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+// Read the stored port name
+static inline void EEPROM_Read_TXMAC() {
+	// Read the 8 bytes from EEPROM into the txmac variable.
+	for (uint8_t i = 0; i < 8; i++) {
+		txmac[i] = eeprom_read_byte((uint8_t*)(EEPROM_OFFSET_TXMAC+i));
+	}
+}
+// Write the port name to EEPROM
+static inline void EEPROM_Write_TXMAC() {
+	// Write the 8 bytes from the txmac variable into EEPROM
+	for (uint8_t i = 0; i < 8; i++) {
+		eeprom_update_byte((uint8_t*)(EEPROM_OFFSET_TXMAC+i), txmac[i]);
+	}
 }
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

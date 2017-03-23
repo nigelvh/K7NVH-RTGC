@@ -35,6 +35,10 @@
 // storage of color codes/modified strings.
 #define ENABLECOLORS
 
+// Enable printing STATE debug messages over the USB console
+#define DEBUG_STATE
+
+
 #define SOFTWARE_STR "\r\nK7NVH RTGC"
 #define HARDWARE_VERS "1.0"
 #define SOFTWARE_VERS "1.0"
@@ -47,6 +51,9 @@
 #define CHANNEL1_SENSE PB2
 #define CHANNEL2_SENSE PD5
 #define BEEP PD1
+
+// EEPROM Offsets
+#define EEPROM_OFFSET_TXMAC 0 // 8 bytes at offset 0
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // ~~ Globals
@@ -76,8 +83,9 @@ static FILE USBSerialStream;
 const char STR_Backspace[] PROGMEM = "\x1b[D \x1b[D";
 
 // Command strings
-const char STR_Command_STATUS[] PROGMEM = "STATUS";
+const char STR_Command_TXMAC[] PROGMEM = "TXMAC";
 const char STR_Command_DEBUG[] PROGMEM = "DEBUG";
+const char STR_Command_SETMAC[] PROGMEM = "SETMAC";
 
 // State Variables
 char * DATA_IN;
@@ -96,7 +104,7 @@ typedef struct {
   uint8_t payload[MAX_PAYLOAD];
 } PACKET;
 uint8_t inCbuf[CBUFSIZE], next_in, next_out, fireCode;
-const uint8_t txmac[] = {0x00, 0x13, 0xA2, 0x00, 0x40, 0x9B, 0xD4, 0xCC};
+uint8_t txmac[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
 
 /** LUFA CDC Class driver interface configuration and state information.
@@ -143,7 +151,7 @@ static inline void DEBUG_Dump(void);
 
 // Output
 static inline void printPGMStr(PGM_P s);
-static inline void PRINT_Status(void);
+static inline void PRINT_TXMAC(void);
 
 // Input
 static inline void INPUT_Clear(void);
@@ -153,6 +161,10 @@ static inline void INPUT_Parse(void);
 static inline uint8_t UART_Recv_Available(void);
 static inline char UART_Recv_Char(void);
 static inline void UART_Send_Char(char c);
+
+// EEPROM Read & Write
+static inline void EEPROM_Read_TXMAC(void);
+static inline void EEPROM_Write_TXMAC(void);
 
 // Utility
 uint8_t receiveMSG(void);
