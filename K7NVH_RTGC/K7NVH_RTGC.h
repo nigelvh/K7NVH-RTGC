@@ -90,6 +90,7 @@ const char STR_Command_SETMAC[] PROGMEM = "SETMAC";
 // State Variables
 char * DATA_IN;
 uint8_t DATA_IN_POS = 0;
+typedef enum {NOCHANGE, OFF, VERYSLOW, SLOW, FAST, ON} BEEP_MODE;
 
 // Launch RX
 #define CBUFSIZE (200)

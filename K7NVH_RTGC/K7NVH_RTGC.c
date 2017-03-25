@@ -4,9 +4,37 @@
 
 PACKET packet;
 RX_STATE state;
+BEEP_MODE beeper;
 
 ISR(WDT_vect){
 	counter++;
+	
+	// Handle the beeper
+	switch (beeper) {
+		case NOCHANGE:
+			// Don't change the beeper (outside control)
+			break;
+		case OFF:
+			// Actively turn the beeper off
+			PORTD &= ~(1 << BEEP);
+			break;
+		case VERYSLOW:
+			// Once every 5 seconds
+			if (counter % 20 == 0) { PORTD |= (1 << BEEP); } else { PORTD &= ~(1 << BEEP); }
+			break;
+		case SLOW:
+			// Once per second
+			if (counter % 4 == 0) { PORTD |= (1 << BEEP); } else { PORTD &= ~(1 << BEEP); }
+			break;
+		case FAST:
+			// Twice per second
+			if (counter % 2 == 0) { PORTD |= (1 << BEEP); } else { PORTD &= ~(1 << BEEP); }
+			break;
+		case ON:
+			// On solid
+			PORTD |= (1 << BEEP);
+			break;
+	}
 }
 
 // Main program entry point.
@@ -14,6 +42,8 @@ int main(void) {
 	// Initialize some variables
 	int16_t BYTE_IN = -1;
 	DATA_IN = malloc(DATA_BUFF_LEN);
+	beeper = OFF;
+	beeper = NOCHANGE;
 	
 	// Set the watchdog timer to interrupt for timekeeping
 	MCUSR &= ~(1 << WDRF);
@@ -177,7 +207,7 @@ int main(void) {
 			// COFFEE - Wait for 10s. Gives time for operator to clear area or cancel.
 			case COFFEE:
 				// Beep while we're waiting
-				if (counter % 2 == 0) { PORTD |= (1 << BEEP); } else { PORTD &= ~(1 << BEEP); }
+				beeper = SLOW;
 				if (counter > timer + (4 * 10)) {
 					timer = counter; // Reset the timer variable to the current time.
 					state = NOLINK; // Advance the state to NOLINK
@@ -189,6 +219,8 @@ int main(void) {
 				break;
 			// NOLINK - We don't have an active connection or it timed out. Wait for packets.
 			case NOLINK:
+				// No link = No beeps
+				beeper = OFF;
 				if (receiveMSG() && packet.payload[12] == 'C' && packet.payload[13] == 'H' && packet.payload[14] == 'K') {
 					timer = counter; // Reset the timer variable to the current time.
 					state = LINK; // Advance the state to LINK
@@ -199,6 +231,8 @@ int main(void) {
 				break;
 			// LINK - We've got an active connection, make sure it doesn't time out, and parse incoming packets.
 			case LINK:
+				// Reset the beep if it was set in a packet parse
+				beeper = VERYSLOW;
 				// If it's been more than 11s since the last message, jump back to NOLINK
 				if (counter > timer + (4 * 11)) {
 					state = NOLINK;
@@ -233,6 +267,8 @@ int main(void) {
 				break;
 			// ARM - We've received an ARM packet. Make sure it doesn't time out, and handle a FIRE
 			case ARM:
+				// Beep fast in ARM
+				beeper = FAST;
 				// If it's been more than 11s since the last message, jump back to NOLINK
 				if (counter > timer + (4 * 11)) {
 					state = NOLINK;
@@ -258,6 +294,9 @@ int main(void) {
 						break;
 					}
 					if (packet.payload[12] == 'F' && packet.payload[13] == 'I') {
+						// Solid beep during fire.
+						beeper = ON;
+						
 						state = FIRE;
 #ifdef DEBUG_STATE
 						printPGMStr(PSTR("ARM - FI0 -> FIRE\r\n"));
