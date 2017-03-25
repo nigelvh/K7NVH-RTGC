@@ -19,11 +19,17 @@ While in the USB serial console, some commands are available to aid configuratio
 
 ## TONE INDICATIONS
 On bootup the system provides the following tones:
+
 	1/2 second startup tone.
+	
 	1/2 second channel 1 indicator.
+	
 	1/10 second channel 1 continuity (absent if no continuity).
+	
 	1/2 second channel 2 indicator.
+	
 	1/10 second channel 2 continuity (absent if no continuity).
+	
 	10 seconds of 1 beep every second during which the system will accept no fire commands to ensure pad safety.
 
 After bootup, the tones will indicate current state:
